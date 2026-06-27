@@ -2,6 +2,12 @@
 
 RepoDoc: Automated Documentation Generation and Maintenance via Repository Knowledge Graph
 
+This forked version fixed some personnal issues:
+
+- Reworked JSON management + prompting + thinking mode to better handle Qwen3.6.
+- Added a progress tracker to better grasp the length of documentation generation.
+- Fixed some issues with leaf node management accross the clustering phase.
+
 ## Usage
 
 ```bash
