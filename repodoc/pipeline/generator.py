@@ -1,9 +1,9 @@
 import asyncio
+import logging
 import os
 import subprocess
 import time
 import glob
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
 
@@ -11,7 +11,10 @@ from src.config import Config
 from src.analysis import DependencyGraphBuilder
 from src.graph.builder import build_graph_from_analysis
 from src.agents import create_agent
+from src.progress import ProgressTracker
 from src.utils import file_manager, validate_and_fix_links, log_operation
+
+logger = logging.getLogger(__name__)
 
 
 def flatten_module_tree_leaf_first(
@@ -88,6 +91,7 @@ class DocPipeline:
         self.module_tree = {}
         self._start_time = None
         self._generated_files = []
+        self.progress: ProgressTracker | None = None
 
     def get_data_dir(self) -> str:
         return os.path.join(self.config.output_dir, "data")
@@ -215,18 +219,28 @@ class DocPipeline:
             children_docs = {}
 
         depth_groups = group_modules_by_depth(module_tree)
+        workers = max(1, int(getattr(self.config, "cluster_max_workers", 1)))
+        sem = asyncio.Semaphore(workers)
+
+        async def _run_module(module_name, module_info, full_path):
+            try:
+                async with sem:
+                    return await self._generate_single_module_doc(
+                        module_name, module_info, full_path, module_tree
+                    )
+            finally:
+                if self.progress:
+                    self.progress.tick(f"module:{full_path}")
 
         results = []
 
         for depth in sorted(depth_groups.keys()):
             modules_at_depth = depth_groups[depth]
 
-            tasks = []
-            for module_name, module_info, full_path in modules_at_depth:
-                task = self._generate_single_module_doc(
-                    module_name, module_info, full_path, module_tree
-                )
-                tasks.append(task)
+            tasks = [
+                _run_module(module_name, module_info, full_path)
+                for module_name, module_info, full_path in modules_at_depth
+            ]
 
             depth_results = await asyncio.gather(*tasks, return_exceptions=True)
             results.extend([r for r in depth_results if not isinstance(r, Exception)])
@@ -369,23 +383,30 @@ class DocPipeline:
                         module_components_map[module_name] = []
                     module_components_map[module_name].append(comp_id)
 
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = []
+        workers = max(1, int(getattr(self.config, "cluster_max_workers", 1)))
+        sem = asyncio.Semaphore(workers)
 
-            for module_name, comp_ids in module_components_map.items():
-                module_dir = os.path.join(docs_dir, module_name)
-                file_manager.ensure_directory(module_dir)
-
-                for comp_id in comp_ids:
-                    future = executor.submit(
-                        asyncio.run,
-                        self._generate_single_component(
-                            comp_id, module_dir, module_name
-                        ),
+        async def _run_component(comp_id, module_dir, module_name):
+            try:
+                async with sem:
+                    return await self._generate_single_component(
+                        comp_id, module_dir, module_name
                     )
-                    futures.append(future)
+            finally:
+                if self.progress:
+                    node = self.components.get(comp_id)
+                    self.progress.tick(
+                        f"comp:{node.name}" if node and node.name else "comp"
+                    )
 
-            results = [f.result() for f in futures]
+        tasks = []
+        for module_name, comp_ids in module_components_map.items():
+            module_dir = os.path.join(docs_dir, module_name)
+            file_manager.ensure_directory(module_dir)
+            for comp_id in comp_ids:
+                tasks.append(_run_component(comp_id, module_dir, module_name))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid_results = [
             r for r in results if r is not None and not isinstance(r, Exception)
@@ -731,6 +752,9 @@ Return ONLY the JSON, no explanation."""
         except Exception as e:
             print(f"Warning: Overview generation failed: {e}")
             return None
+        finally:
+            if self.progress:
+                self.progress.tick("overview")
 
     async def _generate_diagram_safe(self, output_dir: str):
         try:
@@ -738,6 +762,9 @@ Return ONLY the JSON, no explanation."""
         except Exception as e:
             print(f"Warning: Architecture diagram generation failed: {e}")
             return None
+        finally:
+            if self.progress:
+                self.progress.tick("diagram")
 
     async def generate_all(self, docs_dir: str = None, data_dir: str = None):
         docs_dir = docs_dir or self.config.docs_dir
@@ -750,6 +777,23 @@ Return ONLY the JSON, no explanation."""
 
         module_tree = self.load_module_tree()
 
+        # Phase 3 progress: count the units that will trigger an LLM call.
+        n_components = 0
+        for module_info in module_tree.values():
+            for comp_id in module_info.get("components", []):
+                node = self.components.get(comp_id)
+                if node and node.name:
+                    n_components += 1
+        n_modules = len(flatten_module_tree_leaf_first(module_tree))
+        total_units = n_components + n_modules + 2  # +overview +architecture diagram
+        self.progress = ProgressTracker(total_units, label="Phase 3")
+        logger.info(
+            "Phase 3: %d docs to generate (%d components, %d modules, +overview +diagram)",
+            total_units,
+            n_components,
+            n_modules,
+        )
+
         component_results = await self.generate_component_docs(
             docs_dir=docs_dir, module_tree=module_tree
         )
@@ -759,6 +803,9 @@ Return ONLY the JSON, no explanation."""
             self._generate_overview_safe(os.path.join(docs_dir, "README.md")),
             self._generate_diagram_safe(data_dir),
         )
+
+        if self.progress:
+            self.progress.finish()
 
         self._update_graph_with_docs_safe(data_dir, docs_dir)
         self._extract_concepts_safe(data_dir)

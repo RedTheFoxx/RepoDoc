@@ -1,7 +1,7 @@
 """LLM calls (OpenAI-compatible API). Used by clustering and doc generation."""
 
 import logging
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -21,6 +21,9 @@ def call_llm(
     model: str | None = None,
     temperature: float = 0.0,
     max_tokens: int = 8192,
+    system: str | None = None,
+    response_format: dict | None = None,
+    extra_body: dict | None = None,
 ) -> tuple[str, TokenUsage]:
     """
     Call LLM with the given prompt (OpenAI-compatible chat API).
@@ -31,6 +34,12 @@ def call_llm(
         model: Model name override (default: config.main_model).
         temperature: Sampling temperature.
         max_tokens: Max response tokens.
+        system: Optional system message. Format instructions are followed more
+            reliably when placed here.
+        response_format: Optional response_format dict (e.g. {"type": "json_object"})
+            to force a structured/JSON output.
+        extra_body: Optional params forwarded to the API (e.g. reasoning_effort,
+            chat_template_kwargs) for provider-specific controls like Ollama thinking.
 
     Returns:
         Tuple of (assistant message content, token usage dict).
@@ -50,24 +59,36 @@ def call_llm(
         logger.warning(f"Prompt too long ({len(prompt)} chars), truncating to 60K")
         prompt = prompt[:60000]
 
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        response = client.chat.completions.create(**kwargs)
     except APIError as e:
         logger.error(f"API Error: {e}")
-        # Fallback to a smaller max_tokens if API error
+        # Fallback: drop format constraints (some providers reject them) and shrink
+        # max_tokens to fit stricter limits.
+        fallback_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("response_format", "extra_body")
+        }
         if max_tokens > 4096:
-            logger.info("Retrying with smaller max_tokens...")
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=4096,
-            )
+            logger.info("Retrying with smaller max_tokens and no format constraints...")
+            fallback_kwargs["max_tokens"] = 4096
+            response = client.chat.completions.create(**fallback_kwargs)
         else:
             raise
     usage = response.usage
@@ -85,6 +106,9 @@ async def call_llm_async(
     model: str | None = None,
     temperature: float = 0.0,
     max_tokens: int = 8192,
+    system: str | None = None,
+    response_format: dict | None = None,
+    extra_body: dict | None = None,
 ) -> tuple[str, TokenUsage]:
     """
     Async version of call_llm with OpenAI-compatible async chat API.
@@ -95,6 +119,10 @@ async def call_llm_async(
         model: Model name override (default: config.main_model).
         temperature: Sampling temperature.
         max_tokens: Max response tokens.
+        system: Optional system message for more reliable format adherence.
+        response_format: Optional response_format dict (e.g. {"type": "json_object"}).
+        extra_body: Optional provider-specific params (e.g. reasoning_effort,
+            chat_template_kwargs for Ollama thinking control).
 
     Returns:
         Tuple of (assistant message content, token usage dict).
@@ -113,23 +141,34 @@ async def call_llm_async(
         logger.warning(f"Prompt too long ({len(prompt)} chars), truncating to 60K")
         prompt = prompt[:60000]
 
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+
     try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        response = await client.chat.completions.create(**kwargs)
     except APIError as e:
         logger.error(f"API Error: {e}")
+        fallback_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("response_format", "extra_body")
+        }
         if max_tokens > 4096:
-            logger.info("Retrying with smaller max_tokens...")
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=4096,
-            )
+            logger.info("Retrying with smaller max_tokens and no format constraints...")
+            fallback_kwargs["max_tokens"] = 4096
+            response = await client.chat.completions.create(**fallback_kwargs)
         else:
             raise
     finally:

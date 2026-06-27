@@ -24,6 +24,13 @@ class Config:
     # Optional LLM-based concept extraction (enhances keyword matching)
     llm_concept_extraction: bool = False  # set True for LLM-enhanced concept extraction
     llm_concept_max_components: int = 100  # max components to process with LLM (cost control)
+    # Clustering robustness (tuned for local Ollama / lightweight models like qwen3)
+    cluster_json_mode: bool = True  # use response_format json_object to force valid JSON
+    cluster_max_workers: int = 1  # serialize batches (local single-inference setups)
+    cluster_batch_size: int = 150  # components per LLM call (lower helps weak models follow format)
+    # Disable qwen3-style "thinking" to save tokens and stick to the requested format.
+    # None => auto-detect from model name (qwen3 => True, else False).
+    disable_thinking: bool | None = None
 
     def __post_init__(self) -> None:
         if self.cluster_model is None:

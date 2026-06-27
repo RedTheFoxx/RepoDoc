@@ -1,107 +1,106 @@
-"""Prompts for clustering components into modules."""
+"""Prompts for clustering components into modules.
+
+``format_cluster_prompt`` returns a ``(system, user)`` tuple so that format
+instructions live in the system message (followed more reliably by lightweight
+models) while the data to process lives in the user message. The user message
+is prefixed with ``/no_think`` when thinking is disabled (qwen3).
+"""
 
 from typing import Any
 
-CLUSTER_REPO_PROMPT = """
-You are a code analysis assistant. Your task is to group software components into logical modules.
+_SYSTEM_JSON = """\
+You are a code analysis assistant. Group the provided software components into logical modules.
 
-## Rules (STRICTLY FOLLOW):
-1. ONLY output the JSON structure inside <GROUPED_COMPONENTS> tags - NO explanation, NO introduction, NO markdown formatting
-2. The JSON must be a dictionary with module names as keys
-3. Each module must have exactly: "path" (string) and "components" (list of strings)
-4. Group components that are semantically related (e.g., all HTTP-related components together, all database-related together)
-5. Include all provided components - do not exclude any unless clearly unrelated
-6. Use descriptive module names that reflect the functionality
+Output rules (STRICT):
+- Output ONLY a JSON object. No prose, no markdown, no code fences, no explanations.
+- The JSON is a dictionary mapping module name -> {"path": "<relative dir>", "components": ["comp1", "comp2"]}.
+- Group semantically related components together (e.g. http, database, auth, utils).
+- Include EVERY provided component exactly once. Do not drop, rename or invent any.
+- Use short, descriptive module names (snake_case).
 
-## Component list:
-<POTENTIAL_CORE_COMPONENTS>
-{potential_core_components}
-</POTENTIAL_CORE_COMPONENTS>
+Example:
+{"http": {"path": "src/http", "components": ["HttpRequest", "HttpResponse"]},
+ "db": {"path": "src/db", "components": ["Model", "QuerySet"]}}
 
-## Output format (use this EXACT structure):
-<GROUPED_COMPONENTS>
-{{
-    "http": {{
-        "path": "django/http",
-        "components": ["HttpRequest", "HttpResponse", "JsonResponse"]
-    }},
-    "database": {{
-        "path": "django/db",
-        "components": ["Model", "QuerySet", "Transaction"]
-    }}
-}}
-</GROUPED_COMPONENTS>
-
-## CRITICAL:
-- Output ONLY the content between <GROUPED_COMPONENTS> and </GROUPED_COMPONENTS>
-- Do NOT include any other text, explanations, or markdown
-- The JSON must be valid and parseable
+Return ONLY the JSON object.
 """.strip()
 
-CLUSTER_MODULE_PROMPT = """
-You are a code analysis assistant. Your task is to group software components into logical sub-modules.
+_SYSTEM_TAGS = """\
+You are a code analysis assistant. Group the provided software components into logical modules.
 
-## Existing module structure:
-<MODULE_TREE>
-{module_tree}
-</MODULE_TREE>
+Output rules (STRICT):
+- Output ONLY JSON wrapped between <GROUPED_COMPONENTS> and </GROUPED_COMPONENTS> tags.
+- No prose outside the tags, no markdown, no explanations.
+- The JSON is a dictionary mapping module name -> {"path": "<relative dir>", "components": ["comp1", "comp2"]}.
+- Group semantically related components together.
+- Include EVERY provided component exactly once. Do not drop, rename or invent any.
 
-## Components to group (in module {module_name}):
-<POTENTIAL_CORE_COMPONENTS>
-{potential_core_components}
-</POTENTIAL_CORE_COMPONENTS>
-
-## Rules (STRICTLY FOLLOW):
-1. ONLY output the JSON structure inside <GROUPED_COMPONENTS> tags - NO explanation, NO introduction, NO markdown
-2. Group components that are semantically related within this module
-3. Use descriptive sub-module names that reflect the functionality
-4. Include all provided components
-
-## Output format:
+Example:
 <GROUPED_COMPONENTS>
-{{
-    "submodule_name": {{
-        "path": "relative/path",
-        "components": ["comp1", "comp2"]
-    }}
-}}
+{"http": {"path": "src/http", "components": ["HttpRequest", "HttpResponse"]},
+ "db": {"path": "src/db", "components": ["Model", "QuerySet"]}}
 </GROUPED_COMPONENTS>
 
-## CRITICAL: Output ONLY the JSON between the tags, nothing else.
+Return ONLY the tagged JSON.
 """.strip()
+
+
+def _format_tree(
+    tree: dict[str, Any], module_name: str | None, indent: int = 0
+) -> list[str]:
+    lines: list[str] = []
+    for key, value in tree.items():
+        label = f"{key} (current module)" if key == module_name else key
+        lines.append(f"{'  ' * indent}{label}")
+        comps = value.get("components", [])
+        lines.append(f"{'  ' * (indent + 1)}Core components: {', '.join(comps)}")
+        children = value.get("children")
+        if isinstance(children, dict) and children:
+            lines.append(f"{'  ' * (indent + 1)}Children:")
+            lines.extend(_format_tree(children, module_name, indent + 2))
+    return lines
 
 
 def format_cluster_prompt(
     potential_core_components: str,
     module_tree: dict[str, Any] | None = None,
     module_name: str | None = None,
-) -> str:
-    """Build cluster prompt: repo-level or module-level."""
+    disable_thinking: bool = False,
+    use_tags: bool = False,
+) -> tuple[str, str]:
+    """Build the cluster prompt as a ``(system, user)`` tuple.
+
+    Args:
+        potential_core_components: Formatted component list to group.
+        module_tree: Existing module structure (module-level clustering). Repo-level
+            when empty/None.
+        module_name: Name of the module currently being refined (module-level only).
+        disable_thinking: Prefix the user message with ``/no_think`` (qwen3).
+        use_tags: Ask for JSON wrapped in ``<GROUPED_COMPONENTS>`` tags instead of
+            pure JSON (used as a fallback retry strategy).
+    """
     module_tree = module_tree or {}
-    lines: list[str] = []
+    system = _SYSTEM_TAGS if use_tags else _SYSTEM_JSON
 
-    def _format_tree(tree: dict[str, Any], indent: int = 0) -> None:
-        for key, value in tree.items():
-            if key == module_name:
-                lines.append(f"{'  ' * indent}{key} (current module)")
-            else:
-                lines.append(f"{'  ' * indent}{key}")
-            comps = value.get("components", [])
-            lines.append(f"{'  ' * (indent + 1)} Core components: {', '.join(comps)}")
-            children = value.get("children")
-            if isinstance(children, dict) and children:
-                lines.append(f"{'  ' * (indent + 1)} Children:")
-                _format_tree(children, indent + 2)
+    user_lines: list[str] = []
+    if disable_thinking:
+        user_lines.append("/no_think")
+        user_lines.append("")
 
-    _format_tree(module_tree, 0)
-    formatted_module_tree = "\n".join(lines)
+    if module_tree:
+        user_lines.append("Existing module structure:")
+        user_lines.append("<MODULE_TREE>")
+        user_lines.extend(_format_tree(module_tree, module_name, 0))
+        user_lines.append("</MODULE_TREE>")
+        user_lines.append("")
+        user_lines.append(f"Components to group (in module {module_name or ''}):")
+    else:
+        user_lines.append("Components to group into modules:")
 
-    if not module_tree:
-        return CLUSTER_REPO_PROMPT.format(
-            potential_core_components=potential_core_components
-        )
-    return CLUSTER_MODULE_PROMPT.format(
-        potential_core_components=potential_core_components,
-        module_tree=formatted_module_tree,
-        module_name=module_name or "",
-    )
+    user_lines.append("<POTENTIAL_CORE_COMPONENTS>")
+    user_lines.append(potential_core_components)
+    user_lines.append("</POTENTIAL_CORE_COMPONENTS>")
+    user_lines.append("")
+    user_lines.append("Return ONLY the JSON object.")
+
+    return system, "\n".join(user_lines)

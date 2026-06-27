@@ -30,6 +30,13 @@ from pipeline import run_pipeline
 from src.utils import file_manager
 
 
+def _quiet_http_logging(verbose: bool) -> None:
+    """Silence noisy HTTP 200-OK logs from the OpenAI/httpx client unless verbose."""
+    level = logging.DEBUG if verbose else logging.WARNING
+    for name in ("httpx", "httpcore", "openai", "openai._base_client"):
+        logging.getLogger(name).setLevel(level)
+
+
 def make_config(
     repo_path: str,
     output_dir: str = "output",
@@ -71,6 +78,7 @@ def analyze(repo_path: str, output_dir: str, verbose: bool):
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+    _quiet_http_logging(verbose)
     config = make_config(repo_path, output_dir)
     builder = DependencyGraphBuilder(config)
     try:
@@ -92,6 +100,7 @@ def cluster(repo_path: str, output_dir: str, verbose: bool):
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+    _quiet_http_logging(verbose)
     config = make_config(repo_path, output_dir)
     project_name = get_project_name(repo_path)
     data_dir = os.path.join(output_dir, "data")
@@ -138,6 +147,7 @@ def docs(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+    _quiet_http_logging(verbose)
     config = make_config(
         repo_path,
         output_dir,
@@ -198,6 +208,7 @@ def generate(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+    _quiet_http_logging(verbose)
     config = make_config(
         repo_path,
         output_dir,
@@ -405,6 +416,7 @@ def update(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+    _quiet_http_logging(verbose)
 
     config = make_config(repo_path, output_dir)
     project_name = get_project_name(repo_path)
